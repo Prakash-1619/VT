@@ -570,7 +570,7 @@ def get_file_extension_from_content_type(content_type, url):
     elif 'gif' in content_type:
         return '.gif'
     elif 'image' in content_type:
-        return '.jpg'  default for images
+        return '.jpg'  #default for images
     
     # Fallback to URL detection
     if '.pdf' in url:
