@@ -240,7 +240,8 @@ def main():
                 member_column,
                 purpose_column,
                 vendor_column,
-                event_column
+                event_column,
+                link_column
             )
             st.dataframe(preview_data, use_container_width=True)
         
@@ -255,18 +256,19 @@ def main():
         
         with process_col2:
             if st.button("🚀 PROCESS FILES", type="primary", use_container_width=True):
-                result = process_files(
-                    st.session_state.filtered_df,
-                    folder_name,
-                    link_column,
-                    date_column,
-                    serial_column,
-                    bill_type_column,
-                    member_column,
-                    purpose_column,
-                    vendor_column,
-                    event_column
-                )
+                with st.spinner("Processing files..."):
+                    result = process_files(
+                        st.session_state.filtered_df,
+                        folder_name,
+                        link_column,
+                        date_column,
+                        serial_column,
+                        bill_type_column,
+                        member_column,
+                        purpose_column,
+                        vendor_column,
+                        event_column
+                    )
                 
                 if result['successful'] > 0:
                     # Create ZIP file for download
@@ -279,14 +281,15 @@ def main():
                         label="📥 Download All Files as ZIP",
                         data=zip_buffer.getvalue(),
                         file_name=f"{folder_name}.zip",
-                        mime="application/zip"
+                        mime="application/zip",
+                        key="download_zip"
                     )
                 
                 # Show results
                 show_processing_results(result)
 
 def preview_filenames(df, date_col, serial_col, bill_type_col, member_col, 
-                     purpose_col, vendor_col, event_col):
+                     purpose_col, vendor_col, event_col, link_col):
     """Preview how files will be renamed"""
     preview_data = []
     date_serial_map = {}
@@ -294,11 +297,13 @@ def preview_filenames(df, date_col, serial_col, bill_type_col, member_col,
     for index, row in df.iterrows():
         try:
             # Skip if essential data is missing
-            if pd.isna(row[date_col]) or pd.isna(row[bill_type_col]) or pd.isna(row[member_col]):
+            if (pd.isna(row.get(date_col)) or pd.isna(row.get(bill_type_col)) or 
+                pd.isna(row.get(member_col)) or pd.isna(row.get(link_col))):
                 preview_data.append({
                     'Row': index + 2,
                     'Status': '❌ Missing required data',
-                    'Filename': 'Cannot generate'
+                    'Filename': 'Cannot generate',
+                    'File Type': 'Unknown'
                 })
                 continue
             
@@ -308,15 +313,19 @@ def preview_filenames(df, date_col, serial_col, bill_type_col, member_col,
                 preview_data.append({
                     'Row': index + 2,
                     'Status': '❌ Invalid date',
-                    'Filename': 'Cannot generate'
+                    'Filename': 'Cannot generate',
+                    'File Type': 'Unknown'
                 })
                 continue
             
             date_str = date_obj.strftime('%Y%m%d')
             
             # Serial number
-            if serial_col and not pd.isna(row[serial_col]):
-                serial_no = str(int(row[serial_col])).zfill(3)
+            if serial_col and not pd.isna(row.get(serial_col)):
+                try:
+                    serial_no = str(int(float(row[serial_col]))).zfill(3)
+                except:
+                    serial_no = "001"
             else:
                 # Auto-generate
                 if date_str not in date_serial_map:
@@ -328,40 +337,52 @@ def preview_filenames(df, date_col, serial_col, bill_type_col, member_col,
             # Get values
             bill_type = sanitize_text(row[bill_type_col])
             member = sanitize_text(row[member_col])
-            purpose = sanitize_text(row[purpose_col]) if purpose_col and not pd.isna(row[purpose_col]) else "Purpose"
-            vendor = sanitize_text(row[vendor_col]) if vendor_col and not pd.isna(row[vendor_col]) else "Vendor"
+            purpose = sanitize_text(row[purpose_col]) if purpose_col and not pd.isna(row.get(purpose_col)) else "Purpose"
+            vendor = sanitize_text(row[vendor_col]) if vendor_col and not pd.isna(row.get(vendor_col)) else "Vendor"
             
             # Build filename
             filename_parts = [date_str, serial_no, bill_type, member, purpose, vendor]
             
             # Add event if specified
-            if event_col and not pd.isna(row[event_col]):
+            if event_col and not pd.isna(row.get(event_col)):
                 event = sanitize_text(row[event_col])
                 filename_parts.append(event)
             
             filename = "-".join(filename_parts)
             
+            # Try to detect file type from URL
+            url = row[link_col]
+            file_type = detect_file_type_from_url(url)
+            
             preview_data.append({
                 'Row': index + 2,
                 'Status': '✅ Ready',
-                'Filename': filename + "[.extension]"
+                'Filename': filename + file_type,
+                'File Type': file_type.replace('.', '').upper()
             })
             
         except Exception as e:
             preview_data.append({
                 'Row': index + 2,
                 'Status': f'❌ Error: {str(e)}',
-                'Filename': 'Cannot generate'
+                'Filename': 'Cannot generate',
+                'File Type': 'Unknown'
             })
     
     return pd.DataFrame(preview_data)
 
 def process_files(df, folder_path, link_col, date_col, serial_col, bill_type_col, 
                  member_col, purpose_col, vendor_col, event_col):
-    """Process and download files"""
+    """Process and download files with proper file type detection"""
     
     # Create folder
     os.makedirs(folder_path, exist_ok=True)
+    
+    # Clear existing files in the folder
+    for file in os.listdir(folder_path):
+        file_path = os.path.join(folder_path, file)
+        if os.path.isfile(file_path):
+            os.remove(file_path)
     
     # Initialize
     results = []
@@ -383,8 +404,9 @@ def process_files(df, folder_path, link_col, date_col, serial_col, bill_type_col
                 pd.isna(row.get(bill_type_col)) or pd.isna(row.get(member_col))):
                 results.append({
                     'row': index + 2,
-                    'status': 'Failed - Missing data',
-                    'filename': 'Skipped'
+                    'status': 'Failed - Missing required data',
+                    'filename': 'Skipped',
+                    'file_size': '0 KB'
                 })
                 continue
             
@@ -394,14 +416,15 @@ def process_files(df, folder_path, link_col, date_col, serial_col, bill_type_col
                 results.append({
                     'row': index + 2,
                     'status': 'Failed - Invalid date',
-                    'filename': 'Skipped'
+                    'filename': 'Skipped',
+                    'file_size': '0 KB'
                 })
                 continue
             
             date_str = date_obj.strftime('%Y%m%d')
             
             # Serial number
-            if serial_col and not pd.isna(row[serial_col]):
+            if serial_col and not pd.isna(row.get(serial_col)):
                 try:
                     serial_no = str(int(float(row[serial_col]))).zfill(3)
                 except:
@@ -417,55 +440,80 @@ def process_files(df, folder_path, link_col, date_col, serial_col, bill_type_col
             # Get values
             bill_type = sanitize_text(row[bill_type_col])
             member = sanitize_text(row[member_col])
-            purpose = sanitize_text(row[purpose_col]) if purpose_col and not pd.isna(row[purpose_col]) else "Purpose"
-            vendor = sanitize_text(row[vendor_col]) if vendor_col and not pd.isna(row[vendor_col]) else "Vendor"
+            purpose = sanitize_text(row[purpose_col]) if purpose_col and not pd.isna(row.get(purpose_col)) else "Purpose"
+            vendor = sanitize_text(row[vendor_col]) if vendor_col and not pd.isna(row.get(vendor_col)) else "Vendor"
             
             # Build filename
             filename_parts = [date_str, serial_no, bill_type, member, purpose, vendor]
             
             # Add event if specified
-            if event_col and not pd.isna(row[event_col]):
+            if event_col and not pd.isna(row.get(event_col)):
                 event = sanitize_text(row[event_col])
                 filename_parts.append(event)
             
             base_filename = "-".join(filename_parts)
             
             # Download and save file
-            url = row[link_col]
+            url = str(row[link_col]).strip()
             try:
-                response = requests.get(url, stream=True, timeout=60)
-                response.raise_for_status()
+                # First, try to get headers to determine file type
+                head_response = requests.head(url, timeout=10, allow_redirects=True)
+                content_type = head_response.headers.get('content-type', '').lower()
                 
-                # Determine extension
-                extension = get_file_extension(response, url)
+                # Determine extension from content type
+                extension = get_file_extension_from_content_type(content_type, url)
+                
                 final_filename = base_filename + extension
                 final_path = os.path.join(folder_path, final_filename)
+                
+                # Download the actual file
+                response = requests.get(url, stream=True, timeout=60, allow_redirects=True)
+                response.raise_for_status()
+                
+                # Check if we got actual content
+                content_length = response.headers.get('content-length')
+                if content_length and int(content_length) == 0:
+                    raise Exception("Empty file content")
                 
                 # Save file
                 with open(final_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
+                        if chunk:  # filter out keep-alive chunks
                             f.write(chunk)
+                
+                # Verify file was actually written and has content
+                file_size = os.path.getsize(final_path)
+                if file_size == 0:
+                    os.remove(final_path)
+                    raise Exception("Downloaded file is empty")
+                
+                file_size_kb = round(file_size / 1024, 1)
                 
                 results.append({
                     'row': index + 2,
                     'status': 'Success',
-                    'filename': final_filename
+                    'filename': final_filename,
+                    'file_size': f'{file_size_kb} KB',
+                    'file_type': extension.upper().replace('.', '')
                 })
                 processed_files.append(final_path)
                 
             except Exception as e:
                 results.append({
                     'row': index + 2,
-                    'status': f'Failed - Download error',
-                    'filename': base_filename
+                    'status': f'Failed - {str(e)}',
+                    'filename': base_filename,
+                    'file_size': '0 KB',
+                    'file_type': 'Unknown'
                 })
                 
         except Exception as e:
             results.append({
                 'row': index + 2,
                 'status': f'Failed - {str(e)}',
-                'filename': 'Error'
+                'filename': 'Error',
+                'file_size': '0 KB',
+                'file_type': 'Unknown'
             })
     
     progress_bar.empty()
@@ -490,10 +538,29 @@ def sanitize_text(text):
     sanitized = re.sub(r'[<>:"/\\|?*]', '', text).strip()
     return sanitized.replace(' ', '_')[:30]
 
-def get_file_extension(response, url):
-    """Get correct file extension"""
-    content_type = response.headers.get('content-type', '').lower()
+def detect_file_type_from_url(url):
+    """Detect file type from URL for preview"""
+    try:
+        url = str(url).lower()
+        if '.pdf' in url:
+            return '.pdf'
+        elif '.jpg' in url or '.jpeg' in url:
+            return '.jpg'
+        elif '.png' in url:
+            return '.png'
+        elif '.gif' in url:
+            return '.gif'
+        else:
+            return '.file'
+    except:
+        return '.file'
+
+def get_file_extension_from_content_type(content_type, url):
+    """Get correct file extension from content type and URL"""
+    content_type = str(content_type).lower()
+    url = str(url).lower()
     
+    # Priority to content type detection
     if 'pdf' in content_type:
         return '.pdf'
     elif 'jpeg' in content_type or 'jpg' in content_type:
@@ -502,13 +569,21 @@ def get_file_extension(response, url):
         return '.png'
     elif 'gif' in content_type:
         return '.gif'
-    else:
-        # Try from URL
-        parsed_url = urlparse(url)
-        url_ext = os.path.splitext(parsed_url.path)[1].lower()
-        if url_ext in ['.jpg', '.jpeg', '.png', '.pdf', '.gif']:
-            return url_ext
-        return '.jpg'  # Default to jpg for images
+    elif 'image' in content_type:
+        return '.jpg'  default for images
+    
+    # Fallback to URL detection
+    if '.pdf' in url:
+        return '.pdf'
+    elif '.jpg' in url or '.jpeg' in url:
+        return '.jpg'
+    elif '.png' in url:
+        return '.png'
+    elif '.gif' in url:
+        return '.gif'
+    
+    # Final fallback
+    return '.file'
 
 def create_zip_folder(folder_path):
     """Create ZIP file of the folder"""
@@ -517,7 +592,9 @@ def create_zip_folder(folder_path):
         for root, dirs, files in os.walk(folder_path):
             for file in files:
                 file_path = os.path.join(root, file)
-                zip_file.write(file_path, os.path.relpath(file_path, folder_path))
+                # Only add non-empty files
+                if os.path.getsize(file_path) > 0:
+                    zip_file.write(file_path, os.path.basename(file_path))
     zip_buffer.seek(0)
     return zip_buffer
 
@@ -533,11 +610,22 @@ def show_processing_results(result):
     with col3:
         st.metric("Failed", result['failed'])
     
-    # Show results table
+    # Show results table with file types and sizes
     results_df = pd.DataFrame(result['results'])
+    
+    # Add file type summary
+    if not results_df.empty:
+        st.subheader("File Type Summary")
+        file_types = results_df[results_df['status'] == 'Success']['file_type'].value_counts()
+        for file_type, count in file_types.items():
+            st.write(f"- {file_type}: {count} files")
+    
     st.dataframe(results_df, use_container_width=True)
     
     st.info(f"📁 Files saved to: `{result['folder_path']}`")
+    
+    if result['failed'] > 0:
+        st.error("Some files failed to download. Check the URLs and try again.")
 
 if __name__ == "__main__":
     main()
